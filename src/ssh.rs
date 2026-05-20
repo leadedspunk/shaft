@@ -141,16 +141,32 @@ enum KeyResult {
     Failed,
 }
 
+fn key_file_is_encrypted(path: &PathBuf) -> bool {
+    // PEM keys: "ENCRYPTED" appears in the header line or key type line
+    // OpenSSH format: "ENCRYPTED" may not appear — but bcrypt keys in the binary will
+    // This is a best-effort cross-platform fallback
+    std::fs::read_to_string(path)
+        .map(|s| s.contains("ENCRYPTED") || s.contains("DEK-Info:"))
+        .unwrap_or(false)
+}
+
 fn try_key_once(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Option<&str>) -> KeyResult {
     let pub_key = priv_key.with_extension("pub");
     let pub_opt = if pub_key.exists() { Some(pub_key.as_path()) } else { None };
 
     match sess.userauth_pubkey_file(user, pub_opt, priv_key, passphrase) {
         Ok(_) if sess.authenticated() => KeyResult::Ok,
-        Err(e) if e.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE) => {
-            KeyResult::NeedsPassphrase
+        Err(e) => {
+            // Only suggest passphrase when none was provided and we have evidence the key
+            // is encrypted (libssh2 file error OR key file contains encryption markers)
+            let libssh2_file_err = e.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE);
+            if passphrase.is_none() && (libssh2_file_err || key_file_is_encrypted(priv_key)) {
+                KeyResult::NeedsPassphrase
+            } else {
+                KeyResult::Failed
+            }
         }
-        _ => KeyResult::Failed,
+        Ok(_) => KeyResult::Failed,
     }
 }
 
