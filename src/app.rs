@@ -93,10 +93,22 @@ impl App {
 
     pub fn connect_remote(&mut self, raw: &str) -> Result<()> {
         let target = SshTarget::parse(raw)?;
-        let conn = SshConnection::connect(&target)?;
+        // Match directly — do NOT propagate with ? so NeedsPassword downcast works
+        match SshConnection::connect(&target) {
+            Ok(conn) => self.finish_connect(conn, target),
+            Err(e) if e.downcast_ref::<NeedsPassword>().is_some() => {
+                let host = format!("{}@{}", target.user, target.host);
+                self.ssh_target = Some(target);
+                self.mode = AppMode::Dialog(DialogKind::Password(host));
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn finish_connect(&mut self, conn: SshConnection, target: SshTarget) -> Result<()> {
         let sftp = conn.session.sftp()?;
         let remote_home = conn.home.clone();
-
         let mut prov: Box<dyn FilesystemProvider> =
             Box::new(RemoteProvider::new(sftp, remote_home.clone()));
 
@@ -114,7 +126,9 @@ impl App {
 
     pub fn handle_event(&mut self, event: Event) -> Result<()> {
         match event {
-            Event::Key(key) => self.handle_key(key)?,
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                self.handle_key(key)?
+            }
             Event::Resize(_, _) => {}
             _ => {}
         }
@@ -289,18 +303,8 @@ impl App {
                 self.mode = AppMode::Normal;
                 self.input_buf.clear();
                 if !raw.is_empty() {
-                    match self.connect_remote(&raw) {
-                        Ok(_) => {}
-                        Err(e) if e.downcast_ref::<NeedsPassword>().is_some() => {
-                            if let Ok(target) = SshTarget::parse(&raw) {
-                                let host = format!("{}@{}", target.user, target.host);
-                                self.ssh_target = Some(target);
-                                self.mode = AppMode::Dialog(DialogKind::Password(host));
-                            }
-                        }
-                        Err(e) => {
-                            self.right.error = Some(format!("Connect failed: {}", e));
-                        }
+                    if let Err(e) = self.connect_remote(&raw) {
+                        self.right.error = Some(format!("Connect failed: {}", e));
                     }
                 }
             }
@@ -324,17 +328,7 @@ impl App {
 
     fn connect_remote_with_target(&mut self, target: SshTarget) -> Result<()> {
         let conn = SshConnection::connect(&target)?;
-        let sftp = conn.session.sftp()?;
-        let remote_home = conn.home.clone();
-        let mut prov: Box<dyn FilesystemProvider> =
-            Box::new(RemoteProvider::new(sftp, remote_home.clone()));
-
-        self.right.cwd = remote_home;
-        self.right.label = format!("{}@{}", target.user, target.host);
-        self.right.refresh(prov.as_mut());
-        self.right_provider = Some(prov);
-        self.ssh_target = Some(target);
-        Ok(())
+        self.finish_connect(conn, target)
     }
 
     fn start_transfer(&mut self, is_move: bool) -> Result<()> {
