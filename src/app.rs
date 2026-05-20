@@ -66,29 +66,54 @@ impl App {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let mut left_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
 
-        let conn = SshConnection::connect(&target)?;
-        let sftp = conn.session.sftp()?;
-        let remote_home = conn.home.clone();
-        let mut right_prov: Box<dyn FilesystemProvider> =
-            Box::new(RemoteProvider::new(sftp, remote_home.clone()));
+        match SshConnection::connect(&target) {
+            Ok(conn) => {
+                let sftp = conn.session.sftp()?;
+                let remote_home = conn.home.clone();
+                let mut right_prov: Box<dyn FilesystemProvider> =
+                    Box::new(RemoteProvider::new(sftp, remote_home.clone()));
 
-        let mut left = Pane::new(home.clone(), "Local");
-        let mut right = Pane::new(remote_home, format!("{}@{}", target.user, target.host));
-        left.refresh(left_prov.as_mut());
-        right.refresh(right_prov.as_mut());
+                let mut left = Pane::new(home.clone(), "Local");
+                let mut right = Pane::new(remote_home, format!("{}@{}", target.user, target.host));
+                left.refresh(left_prov.as_mut());
+                right.refresh(right_prov.as_mut());
 
-        Ok(App {
-            left,
-            right,
-            active: 0,
-            mode: AppMode::Normal,
-            input_buf: String::new(),
-            ssh_target: Some(target),
-            left_provider: left_prov,
-            right_provider: Some(right_prov),
-            should_quit: false,
-            visible_rows: 20,
-        })
+                Ok(App {
+                    left,
+                    right,
+                    active: 0,
+                    mode: AppMode::Normal,
+                    input_buf: String::new(),
+                    ssh_target: Some(target),
+                    left_provider: left_prov,
+                    right_provider: Some(right_prov),
+                    should_quit: false,
+                    visible_rows: 20,
+                })
+            }
+            Err(e) if e.downcast_ref::<NeedsPassword>().is_some() => {
+                // key needs passphrase — start local, show password dialog
+                let mut right_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
+                let mut left = Pane::new(home.clone(), "Local");
+                let mut right = Pane::new(home.clone(), "Local");
+                left.refresh(left_prov.as_mut());
+                right.refresh(right_prov.as_mut());
+                let host = format!("{}@{}", target.user, target.host);
+                Ok(App {
+                    left,
+                    right,
+                    active: 0,
+                    mode: AppMode::Dialog(DialogKind::Password(host)),
+                    input_buf: String::new(),
+                    ssh_target: Some(target),
+                    left_provider: left_prov,
+                    right_provider: Some(right_prov),
+                    should_quit: false,
+                    visible_rows: 20,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn connect_remote(&mut self, raw: &str) -> Result<()> {
