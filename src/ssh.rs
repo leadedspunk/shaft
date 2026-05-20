@@ -99,19 +99,26 @@ impl SshTarget {
             }
         }
         if let Some(ids) = params.identity_file {
-            if !ids.is_empty() {
-                let p = &ids[0];
-                let expanded = if p.starts_with("~") {
-                    dirs::home_dir()
-                        .map(|h| h.join(p.strip_prefix("~/").unwrap_or(p)))
-                        .unwrap_or_else(|| p.clone())
-                } else {
-                    p.clone()
-                };
-                self.identity_file = Some(expanded);
+            // use first identity file that exists after tilde expansion
+            for p in &ids {
+                let expanded = expand_tilde(p);
+                if expanded.exists() {
+                    self.identity_file = Some(expanded);
+                    break;
+                }
             }
         }
     }
+}
+
+fn expand_tilde(path: &PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.clone()
 }
 
 pub struct SshConnection {
@@ -179,7 +186,7 @@ fn try_key(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Optio
 fn try_pubkey_auth(sess: &mut Session, user: &str, id_file: &Option<PathBuf>, passphrase: Option<&str>) -> bool {
     // explicit identity file from ssh config
     if let Some(ref path) = id_file {
-        if try_key(sess, user, path, passphrase) {
+        if path.exists() && try_key(sess, user, path, passphrase) {
             return true;
         }
     }
