@@ -1,6 +1,5 @@
 use super::{Entry, FileKind, FilesystemProvider};
 use anyhow::{Context, Result};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 pub struct LocalProvider;
@@ -26,7 +25,7 @@ impl FilesystemProvider for LocalProvider {
                 FileKind::Symlink
             } else if file_type.is_dir() {
                 FileKind::Dir
-            } else if meta.permissions().mode() & 0o111 != 0 {
+            } else if is_executable(&meta, item.path()) {
                 FileKind::Executable
             } else {
                 FileKind::File
@@ -89,4 +88,23 @@ impl FilesystemProvider for LocalProvider {
     fn home_dir(&self) -> PathBuf {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
     }
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata, _path: std::path::PathBuf) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn is_executable(_meta: &std::fs::Metadata, path: std::path::PathBuf) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("exe" | "bat" | "cmd" | "com")
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_executable(_meta: &std::fs::Metadata, _path: std::path::PathBuf) -> bool {
+    false
 }
