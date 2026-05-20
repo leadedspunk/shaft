@@ -157,23 +157,23 @@ fn key_file_is_encrypted(path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-fn try_key_once(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Option<&str>) -> KeyResult {
+// Returns (result, last_error_string)
+fn try_key_once(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Option<&str>) -> (KeyResult, Option<String>) {
     let pub_key = priv_key.with_extension("pub");
     let pub_opt = if pub_key.exists() { Some(pub_key.as_path()) } else { None };
 
     match sess.userauth_pubkey_file(user, pub_opt, priv_key, passphrase) {
-        Ok(_) if sess.authenticated() => KeyResult::Ok,
+        Ok(_) if sess.authenticated() => (KeyResult::Ok, None),
         Err(e) => {
-            // Only suggest passphrase when none was provided and we have evidence the key
-            // is encrypted (libssh2 file error OR key file contains encryption markers)
+            let msg = e.to_string();
             let libssh2_file_err = e.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE);
             if passphrase.is_none() && (libssh2_file_err || key_file_is_encrypted(priv_key)) {
-                KeyResult::NeedsPassphrase
+                (KeyResult::NeedsPassphrase, None)
             } else {
-                KeyResult::Failed
+                (KeyResult::Failed, Some(msg))
             }
         }
-        Ok(_) => KeyResult::Failed,
+        Ok(_) => (KeyResult::Failed, None),
     }
 }
 
@@ -205,36 +205,52 @@ impl SshConnection {
             }
         }
 
-        // Try each key
+        // Try ssh-agent first — best path for passphrase-protected keys
+        if try_agent_auth(&mut sess, &target.user) {
+            let home = get_remote_home(&mut sess)?;
+            return Ok(SshConnection { session: sess, home });
+        }
+
+        // Try key files
+        let mut last_key_err: Option<String> = None;
         for key_path in &keys {
             if let Some(pp) = key_pp {
                 // Passphrase known: try directly. Harmless for unencrypted keys.
                 match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
-                    KeyResult::Ok => {
+                    (KeyResult::Ok, _) => {
                         let home = get_remote_home(&mut sess)?;
                         return Ok(SshConnection { session: sess, home });
+                    }
+                    (_, Some(err)) => {
+                        last_key_err = Some(format!("{}: {}", key_path.display(), err));
                     }
                     _ => {}
                 }
             } else {
                 // No passphrase yet: probe without one to detect encrypted keys.
                 match try_key_once(&mut sess, &target.user, key_path, None) {
-                    KeyResult::Ok => {
+                    (KeyResult::Ok, _) => {
                         let home = get_remote_home(&mut sess)?;
                         return Ok(SshConnection { session: sess, home });
                     }
-                    KeyResult::NeedsPassphrase => {
+                    (KeyResult::NeedsPassphrase, _) => {
                         return Err(anyhow::Error::new(NeedsKeyPassphrase(key_path.clone())));
                     }
-                    KeyResult::Failed => {}
+                    _ => {}
                 }
             }
         }
 
-        // Try ssh-agent
-        if try_agent_auth(&mut sess, &target.user) {
-            let home = get_remote_home(&mut sess)?;
-            return Ok(SshConnection { session: sess, home });
+        // If a key passphrase was provided but no key worked, report the real error.
+        // Don't fall through to server password — it's the wrong credential type.
+        if key_pp.is_some() {
+            return Err(anyhow::anyhow!(
+                "{}",
+                last_key_err.unwrap_or_else(|| {
+                    "key auth failed (libssh2 may not support this key format; \
+                     run: ssh-add ~/.ssh/<keyname>)".to_string()
+                })
+            ));
         }
 
         // Try server password (never use key_passphrase here — wrong credential type)
