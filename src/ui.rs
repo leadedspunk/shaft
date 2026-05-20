@@ -268,12 +268,12 @@ fn draw_dialog(f: &mut Frame, area: Rect, kind: &DialogKind, input: &str) {
         DialogKind::Rename => (" Rename ".to_string(), "New name: ".to_string(), false),
         DialogKind::Connect => (
             " Connect to SSH Host ".to_string(),
-            "user@host[:port]: ".to_string(),
+            "host, user@host, or ssh alias: ".to_string(),
             false,
         ),
         DialogKind::Password(host) => (
-            " Password Required ".to_string(),
-            format!("Password for {}: ", host),
+            " Authentication Required ".to_string(),
+            format!("Password or passphrase for {}: ", host),
             true,
         ),
     };
