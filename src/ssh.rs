@@ -1,20 +1,29 @@
 use anyhow::{Context, Result};
+use ssh2::Session;
+use ssh2_config::{ParseRule, SshConfig};
+use std::io::BufReader;
+use std::net::TcpStream;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct NeedsPassword;
 
 impl std::fmt::Display for NeedsPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "authentication requires a password")
+        write!(f, "no authentication method succeeded")
     }
 }
-
 impl std::error::Error for NeedsPassword {}
-use ssh2::Session;
-use ssh2_config::{ParseRule, SshConfig};
-use std::io::BufReader;
-use std::net::TcpStream;
-use std::path::PathBuf;
+
+#[derive(Debug)]
+pub struct NeedsKeyPassphrase(pub PathBuf);
+
+impl std::fmt::Display for NeedsKeyPassphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "key {} requires a passphrase", self.0.display())
+    }
+}
+impl std::error::Error for NeedsKeyPassphrase {}
 
 #[derive(Debug, Clone)]
 pub struct SshTarget {
@@ -42,7 +51,6 @@ impl SshTarget {
         let (user, host) = if let Some((u, h)) = userhost.split_once('@') {
             (u.to_string(), h.to_string())
         } else {
-            // bare hostname or ssh config alias — user resolved below
             (String::new(), userhost.to_string())
         };
 
@@ -61,7 +69,6 @@ impl SshTarget {
 
         target.apply_ssh_config();
 
-        // last resort: use local username
         if target.user.is_empty() {
             target.user = std::env::var("USER")
                 .or_else(|_| std::env::var("USERNAME"))
@@ -99,7 +106,6 @@ impl SshTarget {
             }
         }
         if let Some(ids) = params.identity_file {
-            // use first identity file that exists after tilde expansion
             for p in &ids {
                 let expanded = expand_tilde(p);
                 if expanded.exists() {
@@ -126,6 +132,28 @@ pub struct SshConnection {
     pub home: PathBuf,
 }
 
+// LIBSSH2_ERROR_FILE = -16: can't open/decrypt private key (passphrase-protected)
+const LIBSSH2_ERROR_FILE: i32 = -16;
+
+enum KeyResult {
+    Ok,
+    NeedsPassphrase,
+    Failed,
+}
+
+fn try_key_once(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Option<&str>) -> KeyResult {
+    let pub_key = priv_key.with_extension("pub");
+    let pub_opt = if pub_key.exists() { Some(pub_key.as_path()) } else { None };
+
+    match sess.userauth_pubkey_file(user, pub_opt, priv_key, passphrase) {
+        Ok(_) if sess.authenticated() => KeyResult::Ok,
+        Err(e) if e.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE) => {
+            KeyResult::NeedsPassphrase
+        }
+        _ => KeyResult::Failed,
+    }
+}
+
 impl SshConnection {
     pub fn connect(target: &SshTarget) -> Result<Self> {
         let addr = format!("{}:{}", target.host, target.port);
@@ -138,19 +166,58 @@ impl SshConnection {
 
         let passphrase = target.password.as_deref();
 
-        // 1. pubkey (no passphrase, then with passphrase if provided)
-        if try_pubkey_auth(&mut sess, &target.user, &target.identity_file, passphrase) {
-            let home = get_remote_home(&mut sess)?;
-            return Ok(SshConnection { session: sess, home });
+        // Build ordered list of keys to try: config key first, then defaults
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let mut keys: Vec<PathBuf> = Vec::new();
+        if let Some(ref k) = target.identity_file {
+            if k.exists() {
+                keys.push(k.clone());
+            }
+        }
+        for name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
+            let p = home.join(".ssh").join(name);
+            if p.exists() && target.identity_file.as_ref() != Some(&p) {
+                keys.push(p);
+            }
         }
 
-        // 2. ssh-agent
+        // Try each key
+        for key_path in &keys {
+            // First attempt: no passphrase
+            match try_key_once(&mut sess, &target.user, key_path, None) {
+                KeyResult::Ok => {
+                    let home = get_remote_home(&mut sess)?;
+                    return Ok(SshConnection { session: sess, home });
+                }
+                KeyResult::NeedsPassphrase => {
+                    // Key is encrypted
+                    if let Some(pp) = passphrase {
+                        // Retry with provided passphrase
+                        match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
+                            KeyResult::Ok => {
+                                let home = get_remote_home(&mut sess)?;
+                                return Ok(SshConnection { session: sess, home });
+                            }
+                            _ => {
+                                // Wrong passphrase or server rejected — fall through
+                            }
+                        }
+                    } else {
+                        // No passphrase available — prompt specifically for this key
+                        return Err(anyhow::Error::new(NeedsKeyPassphrase(key_path.clone())));
+                    }
+                }
+                KeyResult::Failed => {} // server rejected, try next key
+            }
+        }
+
+        // Try ssh-agent
         if try_agent_auth(&mut sess, &target.user) {
             let home = get_remote_home(&mut sess)?;
             return Ok(SshConnection { session: sess, home });
         }
 
-        // 3. login password
+        // Try server password
         if let Some(pw) = passphrase {
             sess.userauth_password(&target.user, pw)
                 .context("password auth")?;
@@ -164,52 +231,14 @@ impl SshConnection {
     }
 }
 
-fn try_key(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: Option<&str>) -> bool {
-    let pub_key = priv_key.with_extension("pub");
-    let pub_opt = if pub_key.exists() { Some(pub_key.as_path()) } else { None };
-
-    // try without passphrase first (works for unprotected keys and is fast)
-    if sess.userauth_pubkey_file(user, pub_opt, priv_key, None).is_ok() && sess.authenticated() {
-        return true;
-    }
-    // try with passphrase if provided
-    if let Some(pp) = passphrase {
-        if sess.userauth_pubkey_file(user, pub_opt, priv_key, Some(pp)).is_ok()
-            && sess.authenticated()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn try_pubkey_auth(sess: &mut Session, user: &str, id_file: &Option<PathBuf>, passphrase: Option<&str>) -> bool {
-    // explicit identity file from ssh config
-    if let Some(ref path) = id_file {
-        if path.exists() && try_key(sess, user, path, passphrase) {
-            return true;
-        }
-    }
-
-    // default keys
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    for key_name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
-        let priv_key = home.join(".ssh").join(key_name);
-        if !priv_key.exists() {
-            continue;
-        }
-        if try_key(sess, user, &priv_key, passphrase) {
-            return true;
-        }
-    }
-
-    false
-}
-
 fn try_agent_auth(sess: &mut Session, user: &str) -> bool {
     let Ok(mut agent) = sess.agent() else { return false };
-    if agent.connect().is_err() { return false };
-    if agent.list_identities().is_err() { return false };
+    if agent.connect().is_err() {
+        return false;
+    }
+    if agent.list_identities().is_err() {
+        return false;
+    }
     for identity in agent.identities().unwrap_or_default() {
         if agent.userauth(user, &identity).is_ok() && sess.authenticated() {
             return true;

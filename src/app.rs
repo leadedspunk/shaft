@@ -1,7 +1,7 @@
 use crate::fs::{local::LocalProvider, remote::RemoteProvider, FilesystemProvider};
 use crate::keybinds::{map_key, Action};
 use crate::pane::Pane;
-use crate::ssh::{NeedsPassword, SshConnection, SshTarget};
+use crate::ssh::{NeedsKeyPassphrase, NeedsPassword, SshConnection, SshTarget};
 use crate::transfer::{copy_entry, move_entry, SharedProgress, TransferProgress};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode};
@@ -20,7 +20,8 @@ pub enum DialogKind {
     MkDir,
     Rename,
     Connect,
-    Password(String),
+    KeyPassphrase(String),  // key file path display string
+    Password(String),       // user@host
 }
 
 pub struct App {
@@ -91,8 +92,29 @@ impl App {
                     visible_rows: 20,
                 })
             }
+            Err(e) if e.downcast_ref::<NeedsKeyPassphrase>().is_some() => {
+                let key_display = e.downcast_ref::<NeedsKeyPassphrase>()
+                    .map(|k| k.0.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut right_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
+                let mut left = Pane::new(home.clone(), "Local");
+                let mut right = Pane::new(home.clone(), "Local");
+                left.refresh(left_prov.as_mut());
+                right.refresh(right_prov.as_mut());
+                Ok(App {
+                    left,
+                    right,
+                    active: 0,
+                    mode: AppMode::Dialog(DialogKind::KeyPassphrase(key_display)),
+                    input_buf: String::new(),
+                    ssh_target: Some(target),
+                    left_provider: left_prov,
+                    right_provider: Some(right_prov),
+                    should_quit: false,
+                    visible_rows: 20,
+                })
+            }
             Err(e) if e.downcast_ref::<NeedsPassword>().is_some() => {
-                // key needs passphrase — start local, show password dialog
                 let mut right_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
                 let mut left = Pane::new(home.clone(), "Local");
                 let mut right = Pane::new(home.clone(), "Local");
@@ -121,6 +143,14 @@ impl App {
         // Match directly — do NOT propagate with ? so NeedsPassword downcast works
         match SshConnection::connect(&target) {
             Ok(conn) => self.finish_connect(conn, target),
+            Err(e) if e.downcast_ref::<NeedsKeyPassphrase>().is_some() => {
+                let key_display = e.downcast_ref::<NeedsKeyPassphrase>()
+                    .map(|k| k.0.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.ssh_target = Some(target);
+                self.mode = AppMode::Dialog(DialogKind::KeyPassphrase(key_display));
+                Ok(())
+            }
             Err(e) if e.downcast_ref::<NeedsPassword>().is_some() => {
                 let host = format!("{}@{}", target.user, target.host);
                 self.ssh_target = Some(target);
@@ -322,6 +352,20 @@ impl App {
                 self.refresh_active();
                 self.mode = AppMode::Normal;
                 self.input_buf.clear();
+            }
+            DialogKind::KeyPassphrase(_) => {
+                let pp = self.input_buf.clone();
+                self.mode = AppMode::Normal;
+                self.input_buf.clear();
+                if let Some(ref mut t) = self.ssh_target {
+                    t.password = Some(pp);
+                }
+                let target = self.ssh_target.clone();
+                if let Some(target) = target {
+                    if let Err(e) = self.connect_remote_with_target(target) {
+                        self.right.error = Some(format!("Auth failed: {}", e));
+                    }
+                }
             }
             DialogKind::Connect => {
                 let raw = self.input_buf.trim().to_string();

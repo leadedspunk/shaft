@@ -266,6 +266,11 @@ fn draw_dialog(f: &mut Frame, area: Rect, kind: &DialogKind, input: &str) {
         ),
         DialogKind::MkDir => (" New Directory ".to_string(), "Name: ".to_string(), false),
         DialogKind::Rename => (" Rename ".to_string(), "New name: ".to_string(), false),
+        DialogKind::KeyPassphrase(key) => (
+            " Key Passphrase Required ".to_string(),
+            format!("Passphrase for {}: ", key),
+            true,
+        ),
         DialogKind::Connect => (
             " Connect to SSH Host ".to_string(),
             "host, user@host, or ssh alias: ".to_string(),
@@ -300,7 +305,11 @@ fn draw_dialog(f: &mut Frame, area: Rect, kind: &DialogKind, input: &str) {
 
     let text = if matches!(
         kind,
-        DialogKind::MkDir | DialogKind::Rename | DialogKind::Connect | DialogKind::Password(_)
+        DialogKind::MkDir
+            | DialogKind::Rename
+            | DialogKind::Connect
+            | DialogKind::KeyPassphrase(_)
+            | DialogKind::Password(_)
     ) {
         format!("{}{}_", prompt, display_input)
     } else {
