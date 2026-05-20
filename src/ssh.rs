@@ -204,31 +204,30 @@ impl SshConnection {
 
         // Try each key
         for key_path in &keys {
-            // First attempt: no passphrase
-            match try_key_once(&mut sess, &target.user, key_path, None) {
-                KeyResult::Ok => {
-                    let home = get_remote_home(&mut sess)?;
-                    return Ok(SshConnection { session: sess, home });
+            if let Some(pp) = passphrase {
+                // Passphrase already available: try directly with it (avoids a wasted
+                // no-passphrase attempt that can dirty the session auth state on some
+                // servers/libssh2 builds). Passing a passphrase to an unencrypted key
+                // is harmless — libssh2 ignores it.
+                match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
+                    KeyResult::Ok => {
+                        let home = get_remote_home(&mut sess)?;
+                        return Ok(SshConnection { session: sess, home });
+                    }
+                    _ => {} // wrong passphrase or server rejected, try next key
                 }
-                KeyResult::NeedsPassphrase => {
-                    // Key is encrypted
-                    if let Some(pp) = passphrase {
-                        // Retry with provided passphrase
-                        match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
-                            KeyResult::Ok => {
-                                let home = get_remote_home(&mut sess)?;
-                                return Ok(SshConnection { session: sess, home });
-                            }
-                            _ => {
-                                // Wrong passphrase or server rejected — fall through
-                            }
-                        }
-                    } else {
-                        // No passphrase available — prompt specifically for this key
+            } else {
+                // No passphrase yet: probe without one to detect encrypted keys.
+                match try_key_once(&mut sess, &target.user, key_path, None) {
+                    KeyResult::Ok => {
+                        let home = get_remote_home(&mut sess)?;
+                        return Ok(SshConnection { session: sess, home });
+                    }
+                    KeyResult::NeedsPassphrase => {
                         return Err(anyhow::Error::new(NeedsKeyPassphrase(key_path.clone())));
                     }
+                    KeyResult::Failed => {}
                 }
-                KeyResult::Failed => {} // server rejected, try next key
             }
         }
 
