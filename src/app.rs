@@ -63,7 +63,7 @@ impl App {
         })
     }
 
-    pub fn new_with_remote(target: SshTarget) -> Result<Self> {
+    pub fn new_with_remote(mut target: SshTarget) -> Result<Self> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let mut left_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
 
@@ -93,9 +93,11 @@ impl App {
                 })
             }
             Err(e) if e.downcast_ref::<NeedsKeyPassphrase>().is_some() => {
-                let key_display = e.downcast_ref::<NeedsKeyPassphrase>()
-                    .map(|k| k.0.to_string_lossy().to_string())
+                let key_path = e.downcast_ref::<NeedsKeyPassphrase>().map(|k| k.0.clone());
+                let key_display = key_path.as_ref()
+                    .map(|k| k.to_string_lossy().to_string())
                     .unwrap_or_default();
+                target.key_passphrase_for = key_path;
                 let mut right_prov: Box<dyn FilesystemProvider> = Box::new(LocalProvider::new());
                 let mut left = Pane::new(home.clone(), "Local");
                 let mut right = Pane::new(home.clone(), "Local");
@@ -144,9 +146,12 @@ impl App {
         match SshConnection::connect(&target) {
             Ok(conn) => self.finish_connect(conn, target),
             Err(e) if e.downcast_ref::<NeedsKeyPassphrase>().is_some() => {
-                let key_display = e.downcast_ref::<NeedsKeyPassphrase>()
-                    .map(|k| k.0.to_string_lossy().to_string())
+                let key_path = e.downcast_ref::<NeedsKeyPassphrase>().map(|k| k.0.clone());
+                let key_display = key_path.as_ref()
+                    .map(|k| k.to_string_lossy().to_string())
                     .unwrap_or_default();
+                let mut target = target;
+                target.key_passphrase_for = key_path;
                 self.ssh_target = Some(target);
                 self.mode = AppMode::Dialog(DialogKind::KeyPassphrase(key_display));
                 Ok(())

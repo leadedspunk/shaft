@@ -31,8 +31,9 @@ pub struct SshTarget {
     pub host: String,
     pub port: u16,
     pub identity_file: Option<PathBuf>,
-    pub key_passphrase: Option<String>, // for decrypting local private key
-    pub password: Option<String>,        // for SSH server password auth
+    pub key_passphrase: Option<String>,       // for decrypting local private key
+    pub key_passphrase_for: Option<PathBuf>,  // which key the passphrase belongs to
+    pub password: Option<String>,              // for SSH server password auth
 }
 
 impl SshTarget {
@@ -66,6 +67,7 @@ impl SshTarget {
             port,
             identity_file: None,
             key_passphrase: None,
+            key_passphrase_for: None,
             password: None,
         };
 
@@ -215,7 +217,15 @@ impl SshConnection {
         let mut last_key_err: Option<String> = None;
         for key_path in &keys {
             if let Some(pp) = key_pp {
-                // Passphrase known: try directly. Harmless for unencrypted keys.
+                // Only use the passphrase for the specific key it was entered for.
+                // Using it on other keys sends the wrong pubkey to the server.
+                let is_target_key = target
+                    .key_passphrase_for
+                    .as_ref()
+                    .map_or(true, |kf| kf == key_path);
+                if !is_target_key {
+                    continue;
+                }
                 match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
                     (KeyResult::Ok, _) => {
                         let home = get_remote_home(&mut sess)?;
