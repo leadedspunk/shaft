@@ -142,11 +142,16 @@ enum KeyResult {
 }
 
 fn key_file_is_encrypted(path: &PathBuf) -> bool {
-    // PEM keys: "ENCRYPTED" appears in the header line or key type line
-    // OpenSSH format: "ENCRYPTED" may not appear — but bcrypt keys in the binary will
-    // This is a best-effort cross-platform fallback
+    // PEM legacy keys: "ENCRYPTED" in header or DEK-Info line
+    // OpenSSH new format: header is always "BEGIN OPENSSH PRIVATE KEY" regardless of encryption;
+    // encryption info is only in the binary body. Treat all OpenSSH-format keys as potentially
+    // encrypted — empty passphrase works fine for unencrypted keys.
     std::fs::read_to_string(path)
-        .map(|s| s.contains("ENCRYPTED") || s.contains("DEK-Info:"))
+        .map(|s| {
+            s.contains("ENCRYPTED")
+                || s.contains("DEK-Info:")
+                || s.contains("BEGIN OPENSSH PRIVATE KEY")
+        })
         .unwrap_or(false)
 }
 
