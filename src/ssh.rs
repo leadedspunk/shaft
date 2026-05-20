@@ -31,7 +31,8 @@ pub struct SshTarget {
     pub host: String,
     pub port: u16,
     pub identity_file: Option<PathBuf>,
-    pub password: Option<String>,
+    pub key_passphrase: Option<String>, // for decrypting local private key
+    pub password: Option<String>,        // for SSH server password auth
 }
 
 impl SshTarget {
@@ -64,6 +65,7 @@ impl SshTarget {
             host,
             port,
             identity_file: None,
+            key_passphrase: None,
             password: None,
         };
 
@@ -185,7 +187,8 @@ impl SshConnection {
         sess.set_tcp_stream(tcp);
         sess.handshake().context("SSH handshake")?;
 
-        let passphrase = target.password.as_deref();
+        let key_pp = target.key_passphrase.as_deref();
+        let server_pw = target.password.as_deref();
 
         // Build ordered list of keys to try: config key first, then defaults
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
@@ -204,17 +207,14 @@ impl SshConnection {
 
         // Try each key
         for key_path in &keys {
-            if let Some(pp) = passphrase {
-                // Passphrase already available: try directly with it (avoids a wasted
-                // no-passphrase attempt that can dirty the session auth state on some
-                // servers/libssh2 builds). Passing a passphrase to an unencrypted key
-                // is harmless — libssh2 ignores it.
+            if let Some(pp) = key_pp {
+                // Passphrase known: try directly. Harmless for unencrypted keys.
                 match try_key_once(&mut sess, &target.user, key_path, Some(pp)) {
                     KeyResult::Ok => {
                         let home = get_remote_home(&mut sess)?;
                         return Ok(SshConnection { session: sess, home });
                     }
-                    _ => {} // wrong passphrase or server rejected, try next key
+                    _ => {}
                 }
             } else {
                 // No passphrase yet: probe without one to detect encrypted keys.
@@ -237,8 +237,8 @@ impl SshConnection {
             return Ok(SshConnection { session: sess, home });
         }
 
-        // Try server password
-        if let Some(pw) = passphrase {
+        // Try server password (never use key_passphrase here — wrong credential type)
+        if let Some(pw) = server_pw {
             sess.userauth_password(&target.user, pw)
                 .context("password auth")?;
             if sess.authenticated() {

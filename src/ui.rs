@@ -266,11 +266,17 @@ fn draw_dialog(f: &mut Frame, area: Rect, kind: &DialogKind, input: &str) {
         ),
         DialogKind::MkDir => (" New Directory ".to_string(), "Name: ".to_string(), false),
         DialogKind::Rename => (" Rename ".to_string(), "New name: ".to_string(), false),
-        DialogKind::KeyPassphrase(key) => (
-            " Key Passphrase Required ".to_string(),
-            format!("Passphrase for {}: ", key),
-            true,
-        ),
+        DialogKind::KeyPassphrase(key) => {
+            let name = std::path::Path::new(key)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(key);
+            (
+                " Key Passphrase Required ".to_string(),
+                format!("Passphrase for {}: ", name),
+                true,
+            )
+        }
         DialogKind::Connect => (
             " Connect to SSH Host ".to_string(),
             "host, user@host, or ssh alias: ".to_string(),

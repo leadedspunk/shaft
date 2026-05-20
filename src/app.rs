@@ -358,7 +358,7 @@ impl App {
                 self.mode = AppMode::Normal;
                 self.input_buf.clear();
                 if let Some(ref mut t) = self.ssh_target {
-                    t.password = Some(pp);
+                    t.key_passphrase = Some(pp);
                 }
                 let target = self.ssh_target.clone();
                 if let Some(target) = target {
