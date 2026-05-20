@@ -206,7 +206,7 @@ fn draw_legend(f: &mut Frame, area: Rect) {
                 ),
                 Span::styled(
                     format!("{} ", desc),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Gray),
                 ),
             ]
         })

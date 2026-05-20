@@ -138,10 +138,13 @@ pub struct SshConnection {
 
 // LIBSSH2_ERROR_FILE = -16: can't open/decrypt private key (passphrase-protected)
 const LIBSSH2_ERROR_FILE: i32 = -16;
+// LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED = -19: sign callback failed (wrong passphrase or unsupported key KDF)
+const LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED: i32 = -19;
 
 enum KeyResult {
     Ok,
     NeedsPassphrase,
+    BadPassphrase(String), // passphrase provided but key still couldn't be decrypted/signed
     Failed,
 }
 
@@ -168,9 +171,17 @@ fn try_key_once(sess: &mut Session, user: &str, priv_key: &PathBuf, passphrase: 
         Ok(_) if sess.authenticated() => (KeyResult::Ok, None),
         Err(e) => {
             let msg = e.to_string();
-            let libssh2_file_err = e.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE);
-            if passphrase.is_none() && (libssh2_file_err || key_file_is_encrypted(priv_key)) {
+            let code = e.code();
+            let is_file_err = code == ssh2::ErrorCode::Session(LIBSSH2_ERROR_FILE);
+            let is_sign_err = code == ssh2::ErrorCode::Session(LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED);
+
+            if passphrase.is_none() && (is_file_err || key_file_is_encrypted(priv_key)) {
+                // No passphrase provided, key appears encrypted — prompt for one
                 (KeyResult::NeedsPassphrase, None)
+            } else if passphrase.is_some() && (is_file_err || is_sign_err) {
+                // Passphrase provided but libssh2 still can't decrypt/sign.
+                // Either wrong passphrase or libssh2 doesn't support this key format (bcrypt KDF).
+                (KeyResult::BadPassphrase(msg), None)
             } else {
                 (KeyResult::Failed, Some(msg))
             }
@@ -230,6 +241,15 @@ impl SshConnection {
                     (KeyResult::Ok, _) => {
                         let home = get_remote_home(&mut sess)?;
                         return Ok(SshConnection { session: sess, home });
+                    }
+                    (KeyResult::BadPassphrase(err), _) => {
+                        // libssh2 cannot decrypt this key (likely bcrypt KDF unsupported in this build).
+                        // ssh-agent handles decryption itself and bypasses this limitation.
+                        return Err(anyhow::anyhow!(
+                            "libssh2 cannot use this key ({}). \
+                             Run `ssh-add` to load it into the agent, then reconnect.",
+                            err
+                        ));
                     }
                     (_, Some(err)) => {
                         last_key_err = Some(format!("{}: {}", key_path.display(), err));

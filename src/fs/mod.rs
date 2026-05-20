@@ -26,11 +26,11 @@ pub struct Entry {
 impl Entry {
     pub fn icon(&self) -> &'static str {
         match self.kind {
-            FileKind::Dir => "\u{f07b}",        // nf-fa-folder
-            FileKind::Symlink => "\u{f0c1}",    // nf-fa-link
-            FileKind::Executable => "\u{f489}", // nf-dev-terminal
-            FileKind::File => "\u{f15b}",       // nf-fa-file
-            FileKind::Unknown => "\u{f128}",    // nf-fa-question
+            FileKind::Dir => "d ",
+            FileKind::Symlink => "l ",
+            FileKind::Executable => "x ",
+            FileKind::File => "- ",
+            FileKind::Unknown => "? ",
         }
     }
 
